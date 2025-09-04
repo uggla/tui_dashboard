@@ -1,3 +1,4 @@
+use std::fs;
 use std::io;
 use std::time::{Duration, Instant};
 use std::env;
@@ -9,7 +10,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::prelude::Alignment;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use tui_big_text::BigText;
@@ -33,7 +34,9 @@ struct PlacesResponse {
 }
 
 enum Mode {
-    Input,
+    InputStart,
+    InputDest,
+    InputDuration,
     Timer,
 }
 
@@ -61,8 +64,26 @@ struct App {
     timer: TimerState,
     client: reqwest::blocking::Client,
     api_key: String,
-    chosen_place: Option<Place>,
+    chosen_start: Option<Place>,
+    chosen_dest: Option<Place>,
+    approach_minutes: Option<u64>,
+    config: Option<AppConfig>,
 }
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+struct SavedPlace {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+struct AppConfig {
+    start: SavedPlace,
+    destination: SavedPlace,
+    approach_minutes: u64,
+}
+
+const CONFIG_PATH: &str = "config.toml";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load env and API key
@@ -102,8 +123,9 @@ fn run_app(
         .user_agent("tui-big-text/0.1")
         .build()?;
 
+    let loaded_config = load_config();
     let mut app = App {
-        mode: Mode::Input,
+        mode: if loaded_config.is_some() { Mode::Timer } else { Mode::InputStart },
         input: InputState {
             text: String::new(),
             cursor: 0,
@@ -116,23 +138,29 @@ fn run_app(
         },
         timer: TimerState {
             start: Instant::now(),
-            duration: Duration::from_secs(DEFAULT_TIMER_SECS),
+            duration: loaded_config
+                .as_ref()
+                .map(|c| Duration::from_secs(c.approach_minutes * 60))
+                .unwrap_or_else(|| Duration::from_secs(DEFAULT_TIMER_SECS)),
             notified: false,
             zero_at: None,
         },
         client,
         api_key,
-        chosen_place: None,
+        chosen_start: loaded_config.as_ref().map(|c| Place { id: c.start.id.clone(), name: c.start.name.clone(), embedded_type: Some("stop_area".into()) }),
+        chosen_dest: loaded_config.as_ref().map(|c| Place { id: c.destination.id.clone(), name: c.destination.name.clone(), embedded_type: Some("stop_area".into()) }),
+        approach_minutes: loaded_config.as_ref().map(|c| c.approach_minutes),
+        config: loaded_config,
     };
 
     loop {
         terminal.draw(|f| match app.mode {
-            Mode::Input => draw_input(f, &app),
+            Mode::InputStart | Mode::InputDest | Mode::InputDuration => draw_input(f, &app),
             Mode::Timer => draw_timer(f, &app),
         })?;
 
         match app.mode {
-            Mode::Input => {
+            Mode::InputStart | Mode::InputDest => {
                 // Debounced fetch for suggestions
                 if app.input.text.len() >= MIN_QUERY_LEN
                     && app.input.text != app.input.last_queried
@@ -154,6 +182,7 @@ fn run_app(
                     app.input.loading = false;
                 }
             }
+            Mode::InputDuration => { /* no suggestions */ }
             Mode::Timer => {
                 // After reaching zero, send notification once
                 let elapsed = app.timer.start.elapsed();
@@ -182,7 +211,8 @@ fn run_app(
             if let Event::Key(k) = event::read()? {
                 if k.kind == KeyEventKind::Press {
                     match app.mode {
-                        Mode::Input => handle_input_keys(&mut app, k.code),
+                        Mode::InputStart | Mode::InputDest => handle_station_keys(&mut app, k.code),
+                        Mode::InputDuration => handle_duration_keys(&mut app, k.code),
                         Mode::Timer => {
                             match k.code {
                                 KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('c')
@@ -210,7 +240,7 @@ fn remaining_time(timer: &TimerState, elapsed: Duration) -> Duration {
     }
 }
 
-fn handle_input_keys(app: &mut App, code: KeyCode) {
+fn handle_station_keys(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Char('q') | KeyCode::Esc => {
             // quit from input
@@ -218,12 +248,29 @@ fn handle_input_keys(app: &mut App, code: KeyCode) {
         }
         KeyCode::Enter => {
             if let Some(place) = app.input.suggestions.get(app.input.selected).cloned() {
-                app.chosen_place = Some(place);
-                // Switch to timer mode
-                app.timer.start = Instant::now();
-                app.timer.notified = false;
-                app.timer.zero_at = None;
-                app.mode = Mode::Timer;
+                match app.mode {
+                    Mode::InputStart => {
+                        app.chosen_start = Some(place);
+                        app.input.text.clear();
+                        app.input.cursor = 0;
+                        app.input.suggestions.clear();
+                        app.input.selected = 0;
+                        app.input.last_queried.clear();
+                        app.input.error = None;
+                        app.mode = Mode::InputDest;
+                    }
+                    Mode::InputDest => {
+                        app.chosen_dest = Some(place);
+                        app.input.text.clear();
+                        app.input.cursor = 0;
+                        app.input.suggestions.clear();
+                        app.input.selected = 0;
+                        app.input.last_queried.clear();
+                        app.input.error = None;
+                        app.mode = Mode::InputDuration;
+                    }
+                    _ => {}
+                }
             }
         }
         KeyCode::Backspace => {
@@ -262,6 +309,53 @@ fn handle_input_keys(app: &mut App, code: KeyCode) {
     }
 }
 
+fn handle_duration_keys(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Char('q') | KeyCode::Esc => std::process::exit(0),
+        KeyCode::Enter => {
+            match parse_minutes(&app.input.text) {
+                Ok(mins) if mins > 0 => {
+                    app.approach_minutes = Some(mins);
+                    if let (Some(start), Some(dest), Some(minutes)) = (
+                        app.chosen_start.clone(),
+                        app.chosen_dest.clone(),
+                        app.approach_minutes,
+                    ) {
+                        let conf = AppConfig {
+                            start: SavedPlace { id: start.id, name: start.name },
+                            destination: SavedPlace { id: dest.id, name: dest.name },
+                            approach_minutes: minutes,
+                        };
+                        let _ = save_config(&conf);
+                        app.config = Some(conf);
+                    }
+                    app.timer.duration = Duration::from_secs(app.approach_minutes.unwrap() * 60);
+                    app.timer.start = Instant::now();
+                    app.timer.notified = false;
+                    app.timer.zero_at = None;
+                    app.mode = Mode::Timer;
+                }
+                _ => {
+                    app.input.error = Some("Please enter minutes, e.g., 5 or 5mn".into());
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            if app.input.cursor > 0 && app.input.cursor <= app.input.text.len() {
+                app.input.text.remove(app.input.cursor - 1);
+                app.input.cursor -= 1;
+            }
+        }
+        KeyCode::Left => { if app.input.cursor > 0 { app.input.cursor -= 1; } }
+        KeyCode::Right => { if app.input.cursor < app.input.text.len() { app.input.cursor += 1; } }
+        KeyCode::Char(c) => {
+            app.input.text.insert(app.input.cursor, c);
+            app.input.cursor += 1;
+        }
+        _ => {}
+    }
+}
+
 fn draw_input(f: &mut ratatui::Frame, app: &App) {
     let area = f.area();
     let chunks = Layout::default()
@@ -280,23 +374,39 @@ fn draw_input(f: &mut ratatui::Frame, app: &App) {
         Span::styled("|", Style::default().fg(Color::Yellow)),
         Span::raw(right),
     ]);
+    let title = match app.mode {
+        Mode::InputStart => "Start station",
+        Mode::InputDest => "Destination station",
+        Mode::InputDuration => "Approach time (minutes, e.g., 5 or 5mn)",
+        Mode::Timer => "",
+    };
     let input = Paragraph::new(input_line)
-        .block(Block::default().borders(Borders::ALL).title("Start point"));
+        .block(Block::default().borders(Borders::ALL).title(title));
     f.render_widget(input, chunks[0]);
 
     // Suggestions list
-    let items: Vec<ListItem> = if app.input.loading {
-        vec![ListItem::new("Loading...")]
-    } else if let Some(err) = &app.input.error {
-        vec![ListItem::new(format!("Error: {err}"))]
-    } else if app.input.suggestions.is_empty() && app.input.text.len() >= MIN_QUERY_LEN {
-        vec![ListItem::new("No results")]
-    } else {
-        app.input
-            .suggestions
-            .iter()
-            .map(|p| ListItem::new(p.name.clone()))
-            .collect()
+    let items: Vec<ListItem> = match app.mode {
+        Mode::InputDuration => {
+            let mut v = Vec::new();
+            if let Some(err) = &app.input.error { v.push(ListItem::new(format!("Error: {err}"))); }
+            v.push(ListItem::new("Enter minutes and press Enter"));
+            v
+        }
+        _ => {
+            if app.input.loading {
+                vec![ListItem::new("Loading...")]
+            } else if let Some(err) = &app.input.error {
+                vec![ListItem::new(format!("Error: {err}"))]
+            } else if app.input.suggestions.is_empty() && app.input.text.len() >= MIN_QUERY_LEN {
+                vec![ListItem::new("No results")]
+            } else {
+                app.input
+                    .suggestions
+                    .iter()
+                    .map(|p| ListItem::new(p.name.clone()))
+                    .collect()
+            }
+        }
     };
     let list_len = items.len();
     let list = List::new(items)
@@ -335,11 +445,22 @@ fn draw_timer(f: &mut ratatui::Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(20),
+            Constraint::Length(3),
             Constraint::Percentage(60),
             Constraint::Percentage(20),
         ])
         .split(size);
+
+    if let Some(conf) = &app.config {
+        let header = Paragraph::new(Line::from(vec![
+            Span::styled(format!("{} ", conf.start.name), Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw("→ "),
+            Span::styled(format!("{}  ", conf.destination.name), Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(format!("• approach {} min", conf.approach_minutes)),
+        ]))
+        .block(Block::default().borders(Borders::ALL).title("Config"));
+        f.render_widget(header, chunks[0]);
+    }
 
     let elapsed = app.timer.start.elapsed();
     let remaining = remaining_time(&app.timer, elapsed);
@@ -392,4 +513,25 @@ fn fetch_places(
         .filter(|p| matches!(p.embedded_type.as_deref(), Some("stop_area")))
         .collect();
     Ok(only_stop_areas)
+}
+
+fn load_config() -> Option<AppConfig> {
+    let data = fs::read_to_string(CONFIG_PATH).ok()?;
+    toml::from_str(&data).ok()
+}
+
+fn save_config(conf: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let data = toml::to_string_pretty(conf)?;
+    fs::write(CONFIG_PATH, data)?;
+    Ok(())
+}
+
+fn parse_minutes(s: &str) -> Result<u64, ()> {
+    let trimmed = s.trim().to_lowercase();
+    let mut digits = String::new();
+    for ch in trimmed.chars() {
+        if ch.is_ascii_digit() { digits.push(ch); } else { break; }
+    }
+    if digits.is_empty() { return Err(()); }
+    digits.parse::<u64>().map_err(|_| ())
 }
