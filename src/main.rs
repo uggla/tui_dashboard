@@ -12,9 +12,12 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::prelude::Alignment;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Table, Row, Cell};
 use tui_big_text::BigText;
 use serde::Deserialize;
+use jiff::{Zoned, civil, Span as JSpan, ToSpan, Unit};
+use jiff::tz::TimeZone;
+use jiff::SpanRound;
 
 const SUGGESTION_DEBOUNCE_MS: u64 = 350;
 const MIN_QUERY_LEN: usize = 2;
@@ -68,6 +71,10 @@ struct App {
     chosen_dest: Option<Place>,
     approach_minutes: Option<u64>,
     config: Option<AppConfig>,
+    journeys: Vec<JourneyRow>,
+    journeys_selected: usize,
+    journeys_loading: bool,
+    journeys_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -151,7 +158,18 @@ fn run_app(
         chosen_dest: loaded_config.as_ref().map(|c| Place { id: c.destination.id.clone(), name: c.destination.name.clone(), embedded_type: Some("stop_area".into()) }),
         approach_minutes: loaded_config.as_ref().map(|c| c.approach_minutes),
         config: loaded_config,
+        journeys: Vec::new(),
+        journeys_selected: 0,
+        journeys_loading: false,
+        journeys_error: None,
     };
+
+    // If we have a config, fetch journeys now
+    if app.config.is_some() {
+        refresh_journeys(&mut app)?;
+        // Set initial timer from first journey if available
+        update_timer_from_selection(&mut app);
+    }
 
     loop {
         terminal.draw(|f| match app.mode {
@@ -221,6 +239,24 @@ fn run_app(
                                     break;
                                 }
                                 KeyCode::Char('q') | KeyCode::Esc => break,
+                                KeyCode::Char('r') => {
+                                    let _ = refresh_journeys(&mut app);
+                                }
+                                KeyCode::Up => {
+                                    if app.journeys_selected > 0 {
+                                        app.journeys_selected -= 1;
+                                        update_timer_from_selection(&mut app);
+                                    }
+                                }
+                                KeyCode::Down => {
+                                    if app.journeys_selected + 1 < app.journeys.len() {
+                                        app.journeys_selected += 1;
+                                        update_timer_from_selection(&mut app);
+                                    }
+                                }
+                                KeyCode::Enter => {
+                                    update_timer_from_selection(&mut app);
+                                }
                                 _ => {}
                             }
                         }
@@ -442,15 +478,12 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 
 fn draw_timer(f: &mut ratatui::Frame, app: &App) {
     let size = f.area();
-    let chunks = Layout::default()
+    let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Percentage(60),
-            Constraint::Percentage(20),
-        ])
+        .constraints([Constraint::Length(3), Constraint::Min(3)])
         .split(size);
 
+    // Header with config summary
     if let Some(conf) = &app.config {
         let header = Paragraph::new(Line::from(vec![
             Span::styled(format!("{} ", conf.start.name), Style::default().add_modifier(Modifier::BOLD)),
@@ -459,9 +492,19 @@ fn draw_timer(f: &mut ratatui::Frame, app: &App) {
             Span::raw(format!("• approach {} min", conf.approach_minutes)),
         ]))
         .block(Block::default().borders(Borders::ALL).title("Config"));
-        f.render_widget(header, chunks[0]);
+        f.render_widget(header, rows[0]);
     }
 
+    // Split main area into journeys (left) and timer (right)
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(rows[1]);
+
+    // Left: journeys table
+    draw_journeys(f, app, cols[0]);
+
+    // Right: timer
     let elapsed = app.timer.start.elapsed();
     let remaining = remaining_time(&app.timer, elapsed);
     let show = if let Some(z) = app.timer.zero_at {
@@ -469,25 +512,25 @@ fn draw_timer(f: &mut ratatui::Frame, app: &App) {
     } else {
         true
     };
-
-    let time_str = format_mmss(remaining);
+    let time_str = format_hhmmss(remaining);
     if show {
         let big = BigText::builder()
             .style(Style::default().fg(Color::Cyan))
             .alignment(Alignment::Center)
             .lines(vec![Line::from(time_str)])
             .build();
-        f.render_widget(big, chunks[1]);
+        f.render_widget(big, cols[1]);
     } else {
-        f.render_widget(Clear, chunks[1]);
+        f.render_widget(Clear, cols[1]);
     }
 }
 
-fn format_mmss(dur: Duration) -> String {
+fn format_hhmmss(dur: Duration) -> String {
     let secs = dur.as_secs();
-    let m = (secs / 60) % 100;
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
     let s = secs % 60;
-    format!("{m:02}:{s:02}")
+    format!("{h:02}:{m:02}:{s:02}")
 }
 
 fn fetch_places(
@@ -513,6 +556,213 @@ fn fetch_places(
         .filter(|p| matches!(p.embedded_type.as_deref(), Some("stop_area")))
         .collect();
     Ok(only_stop_areas)
+}
+
+#[derive(Debug, Clone)]
+struct JourneyRow {
+    dep: Zoned,
+    arr: Zoned,
+    dep_hm: String,
+    arr_hm: String,
+    date_str: String,
+    duration_secs: i64,
+    nb_transfers: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct JourneysResponse {
+    #[serde(default)]
+    journeys: Vec<JourneyItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JourneyItem {
+    #[serde(default)]
+    departure_date_time: String,
+    #[serde(default)]
+    arrival_date_time: String,
+    #[serde(default)]
+    duration: Option<i64>,
+    #[serde(default)]
+    nb_transfers: Option<i64>,
+}
+
+fn refresh_journeys(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
+    let conf = match &app.config { Some(c) => c, None => return Ok(()) };
+    app.journeys_loading = true;
+    app.journeys_error = None;
+    let url = build_journeys_url(&conf.start.id, &conf.destination.id);
+    let resp = app.client.get(url).basic_auth(&app.api_key, Some("")).send()?;
+    if !resp.status().is_success() {
+        app.journeys_loading = false;
+        app.journeys_error = Some(format!("HTTP {}", resp.status()));
+        return Ok(());
+    }
+    let parsed: JourneysResponse = resp.json()?;
+    let rows = parsed
+        .journeys
+        .into_iter()
+        .filter_map(|j| {
+            let dep = parse_sncf_dt(&j.departure_date_time)?;
+            let arr = parse_sncf_dt(&j.arrival_date_time)?;
+            let dur = j.duration.unwrap_or_else(|| {
+                // Fallback: compute seconds from arr - dep via UTC timestamps
+                let dep_sec = rfc3339z_to_epoch(&dep.timestamp().to_string()).unwrap_or(0);
+                let arr_sec = rfc3339z_to_epoch(&arr.timestamp().to_string()).unwrap_or(dep_sec);
+                (arr_sec - dep_sec).max(0)
+            });
+            let dep_hm = format_hm(&dep);
+            let arr_hm = format_hm(&arr);
+            let date_str = format_date(&dep);
+            Some(JourneyRow {
+                dep,
+                arr,
+                dep_hm,
+                arr_hm,
+                date_str,
+                duration_secs: dur,
+                nb_transfers: j.nb_transfers.unwrap_or(0),
+            })
+        })
+        .collect::<Vec<_>>();
+    app.journeys = rows;
+    if app.journeys_selected >= app.journeys.len() { app.journeys_selected = 0; }
+    app.journeys_loading = false;
+    Ok(())
+}
+
+fn build_journeys_url(from_id: &str, to_id: &str) -> String {
+    let base = "https://api.sncf.com/v1/coverage/sncf/journeys";
+    let from = urlencoding::encode(from_id);
+    let to = urlencoding::encode(to_id);
+    format!(
+        "{base}?from={from}&to={to}&first_section_mode[]=walking&last_section_mode[]=walking&min_nb_transfers=0&direct_path=none&min_nb_journeys=25&is_journey_schedules=True"
+    )
+}
+
+fn parse_sncf_dt(s: &str) -> Option<Zoned> {
+    if s.len() < 15 { return None; }
+    let y = s[0..4].parse().ok()?;
+    let m = s[4..6].parse().ok()?;
+    let d = s[6..8].parse().ok()?;
+    let hh = s[9..11].parse().ok()?;
+    let mm = s[11..13].parse().ok()?;
+    let ss = s[13..15].parse().ok()?;
+    let dt = civil::date(y, m, d).at(hh, mm, ss, 0);
+    dt.to_zoned(TimeZone::system()).ok()
+}
+
+fn draw_journeys(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let block = Block::default().borders(Borders::ALL).title("Journeys (r to refresh)");
+    if app.journeys_loading {
+        let p = Paragraph::new("Loading...").block(block);
+        f.render_widget(p, area);
+        return;
+    }
+    if let Some(err) = &app.journeys_error {
+        let p = Paragraph::new(format!("Error: {err}")).block(block);
+        f.render_widget(p, area);
+        return;
+    }
+
+    let header = Row::new(vec![
+        Cell::from("Date"),
+        Cell::from("Dep"),
+        Cell::from("Arr"),
+        Cell::from("Dur"),
+        Cell::from("Changes"),
+    ]).style(Style::default().add_modifier(Modifier::BOLD));
+    let rows = app.journeys.iter().map(|j| {
+        let date = j.date_str.clone();
+        let dep = j.dep_hm.clone();
+        let arr = j.arr_hm.clone();
+        let dur_min = (j.duration_secs / 60).max(0);
+        let tr = j.nb_transfers;
+        Row::new(vec![
+            Cell::from(date),
+            Cell::from(dep),
+            Cell::from(arr),
+            Cell::from(format!("{}m", dur_min)),
+            Cell::from(format!("{}", tr)),
+        ])
+    });
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(10),
+            Constraint::Length(6),
+            Constraint::Length(6),
+            Constraint::Length(6),
+            Constraint::Length(8),
+        ],
+    )
+    .header(header)
+    .block(block)
+    .highlight_symbol("▶ ");
+
+    let mut state = ratatui::widgets::TableState::default();
+    if !app.journeys.is_empty() {
+        let sel = app.journeys_selected.min(app.journeys.len() - 1);
+        state.select(Some(sel));
+    }
+    f.render_stateful_widget(table, area, &mut state);
+}
+
+fn update_timer_from_selection(app: &mut App) {
+    if app.journeys.is_empty() { return; }
+    let sel = app.journeys_selected.min(app.journeys.len() - 1);
+    let dep = app.journeys[sel].dep.clone();
+    let now = Zoned::now();
+    let dep_sec = rfc3339z_to_epoch(&dep.timestamp().to_string()).unwrap_or(0);
+    let now_sec = rfc3339z_to_epoch(&now.timestamp().to_string()).unwrap_or(0);
+    let mut secs = (dep_sec - now_sec).max(0);
+    if let Some(conf) = &app.config { secs -= (conf.approach_minutes as i64) * 60; }
+    if secs < 0 { secs = 0; }
+    app.timer.start = Instant::now();
+    app.timer.duration = Duration::from_secs(secs as u64);
+    app.timer.notified = false;
+    app.timer.zero_at = None;
+}
+
+fn format_hm(z: &Zoned) -> String {
+    // to_string like 2024-07-11T23:14:00-04:00[America/...]
+    let s = z.to_string();
+    if s.len() >= 16 { s[11..16].to_string() } else { s }
+}
+
+fn format_date(z: &Zoned) -> String {
+    let s = z.to_string();
+    if s.len() >= 10 { s[0..10].to_string() } else { s }
+}
+
+fn rfc3339z_to_epoch(s: &str) -> Option<i64> {
+    // Expect format YYYY-MM-DDTHH:MM:SSZ
+    if s.len() < 20 || !s.ends_with('Z') { return None; }
+    let year: i64 = s[0..4].parse().ok()?;
+    let month: i64 = s[5..7].parse().ok()?;
+    let day: i64 = s[8..10].parse().ok()?;
+    let hour: i64 = s[11..13].parse().ok()?;
+    let minute: i64 = s[14..16].parse().ok()?;
+    let second: i64 = s[17..19].parse().ok()?;
+
+    fn is_leap(y: i64) -> bool { (y % 4 == 0) && ((y % 100 != 0) || (y % 400 == 0)) }
+    fn days_before_year(y: i64) -> i64 {
+        let y1 = y - 1;
+        let leaps = y1/4 - y1/100 + y1/400;
+        let base = 1969; // so that days_before_year(1970)=0
+        let leaps_base = base/4 - base/100 + base/400;
+        (y1 - 1970 + 1) * 365 + (leaps - leaps_base)
+    }
+    fn days_before_month(y: i64, m: i64) -> i64 {
+        let md = [0,31,59,90,120,151,181,212,243,273,304,334];
+        let mut d = md[(m-1) as usize] as i64;
+        if m > 2 && is_leap(y) { d += 1; }
+        d
+    }
+
+    let days = days_before_year(year) + days_before_month(year, month) + (day - 1);
+    Some(days * 86_400 + hour * 3600 + minute * 60 + second)
 }
 
 fn load_config() -> Option<AppConfig> {

@@ -1,0 +1,9 @@
+approach_minutes = 10
+
+[start]
+id = "stop_area:SNCF:87747006"
+name = "Grenoble (Grenoble)"
+
+[destination]
+id = "stop_area:SNCF:87747337"
+name = "Voreppe (Voreppe)"
