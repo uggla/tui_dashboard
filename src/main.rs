@@ -23,6 +23,8 @@ const DEFAULT_TIMER_SECS: u64 = 30;
 struct Place {
     id: String,
     name: String,
+    #[serde(default)]
+    embedded_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -384,5 +386,10 @@ fn fetch_places(
         return Err(format!("HTTP {}", resp.status()).into());
     }
     let parsed: PlacesResponse = resp.json()?;
-    Ok(parsed.places)
+    let only_stop_areas = parsed
+        .places
+        .into_iter()
+        .filter(|p| matches!(p.embedded_type.as_deref(), Some("stop_area")))
+        .collect();
+    Ok(only_stop_areas)
 }
