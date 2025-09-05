@@ -67,15 +67,21 @@ pub fn draw_timer(f: &mut ratatui::Frame, app: &App) {
         true
     };
     let time_str = format_hhmmss(remaining);
+    // Right panel (timer) with a visible border
+    let timer_block = Block::default().borders(Borders::ALL).title("Timer");
+    let timer_area = cols[1];
+    f.render_widget(timer_block.clone(), timer_area);
+
+    let inner = timer_block.inner(timer_area);
     if show {
         let big = BigText::builder()
             .style(Style::default().fg(Color::Cyan))
             .alignment(ratatui::prelude::Alignment::Center)
             .lines(vec![Line::from(time_str)])
             .build();
-        f.render_widget(big, cols[1]);
+        f.render_widget(big, inner);
     } else {
-        f.render_widget(Clear, cols[1]);
+        f.render_widget(Clear, inner);
     }
 }
 
