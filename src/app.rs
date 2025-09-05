@@ -1,17 +1,9 @@
-use crate::sncf;
-use crate::sncf::{fetch_places};
+use sncf::fetch_places;
 use jiff::Zoned;
 use ratatui::widgets::ListItem;
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct Place { pub id: String, pub name: String, #[serde(default)] pub embedded_type: Option<String> }
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct PlacesResponse { pub places: Vec<Place> }
-
-#[derive(Debug, Clone)]
-pub struct JourneyRow { pub dep: Zoned, pub arr: Zoned, pub dep_hm: String, pub arr_hm: String, pub date_str: String, pub duration_secs: i64, pub nb_transfers: i64 }
+pub use sncf::{Place, JourneyRow};
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct SavedPlace { pub id: String, pub name: String }
@@ -68,7 +60,7 @@ impl App {
 
     pub fn input_title(&self) -> &'static str { match self.mode { Mode::InputStart => "Start station", Mode::InputDest => "Destination station", Mode::InputDuration => "Approach time (minutes)", Mode::Timer => "" } }
 
-    pub fn suggestion_items(&self) -> Vec<ListItem> {
+    pub fn suggestion_items(&self) -> Vec<ListItem<'_>> {
         match self.mode {
             Mode::InputDuration => {
                 let mut v = Vec::new();
@@ -147,7 +139,7 @@ impl App {
     pub fn refresh_journeys(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let conf = match &self.config { Some(c) => c, None => return Ok(()) };
         self.journeys_loading = true; self.journeys_error = None;
-        match sncf::fetch_journeys(&self.client, &self.api_key, conf) {
+        match sncf::fetch_journeys(&self.client, &self.api_key, &conf.start.id, &conf.destination.id) {
             Ok(rows) => { self.journeys = rows; if self.journeys_selected >= self.journeys.len() { self.journeys_selected = 0; } }
             Err(e) => { self.journeys_error = Some(format!("{e}")); }
         }
@@ -159,8 +151,8 @@ impl App {
         let sel = self.journeys_selected.min(self.journeys.len() - 1);
         let dep = self.journeys[sel].dep.clone();
         let now = Zoned::now();
-        let dep_sec = crate::sncf::rfc3339z_to_epoch(&dep.timestamp().to_string()).unwrap_or(0);
-        let now_sec = crate::sncf::rfc3339z_to_epoch(&now.timestamp().to_string()).unwrap_or(0);
+        let dep_sec = sncf::rfc3339z_to_epoch(&dep.timestamp().to_string()).unwrap_or(0);
+        let now_sec = sncf::rfc3339z_to_epoch(&now.timestamp().to_string()).unwrap_or(0);
         let mut secs = (dep_sec - now_sec).max(0);
         if let Some(conf) = &self.config { secs -= (conf.approach_minutes as i64) * 60; }
         if secs < 0 { secs = 0; }
@@ -173,4 +165,3 @@ impl App {
 pub fn load_config() -> Option<AppConfig> { std::fs::read_to_string(CONFIG_PATH).ok().and_then(|d| toml::from_str(&d).ok()) }
 pub fn save_config(conf: &AppConfig) -> Result<(), Box<dyn std::error::Error>> { let data = toml::to_string_pretty(conf)?; std::fs::write(CONFIG_PATH, data)?; Ok(()) }
 pub fn parse_minutes(s: &str) -> Result<u64, ()> { let trimmed = s.trim().to_lowercase(); let mut digits=String::new(); for ch in trimmed.chars(){ if ch.is_ascii_digit(){digits.push(ch);} else { break; } } if digits.is_empty(){return Err(());} digits.parse::<u64>().map_err(|_| ()) }
-

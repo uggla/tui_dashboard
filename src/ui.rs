@@ -1,11 +1,11 @@
 use crate::app::App;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Row, Table, Cell};
 use tui_big_text::BigText;
 use std::time::Duration;
-use jiff::Zoned;
+// no direct Zoned usage here
 
 pub fn draw_input(f: &mut ratatui::Frame, app: &App) {
     let area = f.area();
@@ -51,7 +51,11 @@ pub fn draw_timer(f: &mut ratatui::Frame, app: &App) {
     let show = if let Some(z) = app.timer.zero_at { ((std::time::Instant::now() - z).as_millis() / 500) % 2 == 0 } else { true };
     let time_str = format_hhmmss(remaining);
     if show {
-        let big = BigText::builder().alignment(ratatui::prelude::Alignment::Center).lines(vec![Line::from(time_str)]).build();
+        let big = BigText::builder()
+            .style(Style::default().fg(Color::Cyan))
+            .alignment(ratatui::prelude::Alignment::Center)
+            .lines(vec![Line::from(time_str)])
+            .build();
         f.render_widget(big, cols[1]);
     } else {
         f.render_widget(Clear, cols[1]);
@@ -99,6 +103,4 @@ pub fn format_hhmmss(dur: Duration) -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
-pub fn format_hm(z: &Zoned) -> String { let s = z.to_string(); if s.len() >= 16 { s[11..16].to_string() } else { s } }
-pub fn format_date(z: &Zoned) -> String { let s = z.to_string(); if s.len() >= 10 { s[0..10].to_string() } else { s } }
-
+// formatting helpers live in the sncf crate; no extra helpers here
