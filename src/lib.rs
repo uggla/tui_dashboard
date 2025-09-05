@@ -69,7 +69,7 @@ pub async fn run_app(
         let _ = tick.tick().await;
         if event::poll(Duration::from_millis(0))?
             && let Event::Key(key) = event::read()?
-            && let Some(value) = handle_keys(&mut app, key)
+            && let Some(value) = handle_keys(&mut app, key).await
         {
             return value;
         }

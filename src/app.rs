@@ -1,6 +1,6 @@
 use jiff::{Unit, Zoned};
 use ratatui::widgets::ListItem;
-use sncf::fetch_places;
+use sncf::{client::ReqwestClient, fetch_places};
 use std::time::{Duration, Instant};
 
 pub use sncf::{JourneyRow, Place};
@@ -47,7 +47,7 @@ pub struct App {
     pub mode: Mode,
     pub input: InputState,
     pub timer: TimerState,
-    pub client: reqwest::Client,
+    pub client: ReqwestClient,
     pub api_key: String,
     pub chosen_start: Option<Place>,
     pub chosen_dest: Option<Place>,
@@ -66,9 +66,7 @@ pub const DEFAULT_TIMER_SECS: u64 = 30;
 
 impl App {
     pub fn new(api_key: String) -> anyhow::Result<Self> {
-        let client = reqwest::Client::builder()
-            .user_agent("tui-big-text/0.1")
-            .build()?;
+        let client = sncf::client::ReqwestClient::new();
         let loaded = load_config();
         Ok(Self {
             mode: if loaded.is_some() {
@@ -197,7 +195,9 @@ impl App {
             &self.api_key,
             &conf.start.id,
             &conf.destination.id,
-        ).await {
+        )
+        .await
+        {
             Ok(rows) => {
                 self.journeys = rows;
                 if self.journeys_selected >= self.journeys.len() {

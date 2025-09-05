@@ -4,7 +4,7 @@ use crossterm::event::{self, KeyCode};
 
 use crate::app::{App, AppConfig, Mode, SavedPlace, save_config};
 
-pub fn handle_keys(app: &mut App, key: event::KeyEvent) -> Option<Result<(), anyhow::Error>> {
+pub async fn handle_keys(app: &mut App, key: event::KeyEvent) -> Option<Result<(), anyhow::Error>> {
     match app.mode {
         Mode::InputStart | Mode::InputDest => handle_station_keys(app, key.code),
         Mode::InputDuration => handle_duration_keys(app, key.code),
@@ -18,7 +18,7 @@ pub fn handle_keys(app: &mut App, key: event::KeyEvent) -> Option<Result<(), any
             }
             KeyCode::Char('q') | KeyCode::Esc => return Some(Ok(())),
             KeyCode::Char('r') => {
-                let _ = app.refresh_journeys();
+                let _ = app.refresh_journeys().await;
             }
             KeyCode::Up => {
                 if app.journeys_selected > 0 {

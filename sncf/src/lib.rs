@@ -1,6 +1,19 @@
+pub mod client;
+mod fake;
+
 use jiff::tz::TimeZone;
 use jiff::{Unit, Zoned, civil};
+use thiserror::Error;
 
+use crate::client::HTTPClient;
+
+#[derive(Error, Debug)]
+pub enum SncfAPIError {
+    #[error("HTTP request failed: {0}")]
+    HttpRequest(#[from] reqwest::Error),
+    #[error("Deserialization failed: {0}")]
+    Deserialization(#[from] serde_json::Error),
+}
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct Place {
     pub id: String,
@@ -42,19 +55,15 @@ struct JourneyItem {
 }
 
 pub async fn fetch_places(
-    client: &reqwest::Client,
+    client: &impl HTTPClient,
     api_key: &str,
     query: &str,
-) -> Result<Vec<Place>, Box<dyn std::error::Error>> {
+) -> Result<Vec<Place>, SncfAPIError> {
     let url = format!(
         "https://api.sncf.com/v1/coverage/sncf/places?q={}",
         urlencoding::encode(query)
     );
-    let resp = client.get(url).basic_auth(api_key, Some("")).send().await?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()).into());
-    }
-    let parsed: PlacesResponse = resp.json().await?;
+    let parsed: PlacesResponse = client.get(&url, api_key, Some("")).await?;
     Ok(parsed
         .places
         .into_iter()
@@ -63,17 +72,13 @@ pub async fn fetch_places(
 }
 
 pub async fn fetch_journeys(
-    client: &reqwest::Client,
+    client: &impl HTTPClient,
     api_key: &str,
     from_id: &str,
     to_id: &str,
 ) -> Result<Vec<JourneyRow>, Box<dyn std::error::Error>> {
     let url = build_journeys_url(from_id, to_id);
-    let resp = client.get(url).basic_auth(api_key, Some("")).send().await?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()).into());
-    }
-    let parsed: JourneysResponse = resp.json().await?;
+    let parsed: JourneysResponse = client.get(&url, api_key, Some("")).await?;
     let rows = parsed
         .journeys
         .into_iter()
@@ -135,5 +140,22 @@ pub fn format_date(z: &Zoned) -> String {
         s[0..10].to_string()
     } else {
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::client::FakeClient;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn fetch_places_filters_stop_area() {
+        let client = FakeClient::new();
+        let results = fetch_places(&client, "key", "Grenoble").await.unwrap();
+
+        assert_eq!(results.len(), 8, "only stop_area should remain");
+        assert_eq!(results[0].id, "stop_area:SNCF:87747006");
+        assert_eq!(results[7].id, "stop_area:SNCF:87335521");
     }
 }
