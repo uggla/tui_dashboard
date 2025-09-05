@@ -47,7 +47,7 @@ pub struct App {
     pub mode: Mode,
     pub input: InputState,
     pub timer: TimerState,
-    pub client: reqwest::blocking::Client,
+    pub client: reqwest::Client,
     pub api_key: String,
     pub chosen_start: Option<Place>,
     pub chosen_dest: Option<Place>,
@@ -66,7 +66,7 @@ pub const DEFAULT_TIMER_SECS: u64 = 30;
 
 impl App {
     pub fn new(api_key: String) -> anyhow::Result<Self> {
-        let client = reqwest::blocking::Client::builder()
+        let client = reqwest::Client::builder()
             .user_agent("tui-big-text/0.1")
             .build()?;
         let loaded = load_config();
@@ -163,14 +163,14 @@ impl App {
         }
     }
 
-    pub fn maybe_fetch_suggestions(&mut self) {
+    pub async fn maybe_fetch_suggestions(&mut self) {
         if self.input.text.len() >= MIN_QUERY_LEN
             && self.input.text != self.input.last_queried
             && self.input.last_edit_at.elapsed() >= Duration::from_millis(SUGGESTION_DEBOUNCE_MS)
         {
             self.input.loading = true;
             let query = self.input.text.clone();
-            match fetch_places(&self.client, &self.api_key, &query) {
+            match fetch_places(&self.client, &self.api_key, &query).await {
                 Ok(list) => {
                     self.input.suggestions = list;
                     self.input.selected = 0;
@@ -185,7 +185,7 @@ impl App {
         }
     }
 
-    pub fn refresh_journeys(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn refresh_journeys(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let conf = match &self.config {
             Some(c) => c,
             None => return Ok(()),
@@ -197,7 +197,7 @@ impl App {
             &self.api_key,
             &conf.start.id,
             &conf.destination.id,
-        ) {
+        ).await {
             Ok(rows) => {
                 self.journeys = rows;
                 if self.journeys_selected >= self.journeys.len() {

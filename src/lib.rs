@@ -17,16 +17,17 @@ use ratatui::backend::CrosstermBackend;
 
 use crate::events::handle_keys;
 
-pub fn run_app(
+pub async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     api_key: String,
 ) -> anyhow::Result<()> {
     let mut app = App::new(api_key)?;
     if app.config.is_some() {
-        let _ = app.refresh_journeys();
+        let _ = app.refresh_journeys().await;
         app.update_timer_from_selection();
     }
 
+    let mut tick = tokio::time::interval(Duration::from_millis(100));
     loop {
         terminal.draw(|f| match app.mode {
             Mode::InputStart | Mode::InputDest | Mode::InputDuration => ui::draw_input(f, &app),
@@ -35,7 +36,7 @@ pub fn run_app(
 
         match app.mode {
             Mode::InputStart | Mode::InputDest => {
-                app.maybe_fetch_suggestions();
+                app.maybe_fetch_suggestions().await;
             }
             Mode::InputDuration => { /* no suggestions */ }
             Mode::Timer => {
@@ -43,25 +44,30 @@ pub fn run_app(
                 let elapsed = app.timer.start.elapsed();
                 let remaining = app.remaining_time(elapsed);
                 if remaining.is_zero() && !app.timer.notified {
-                    let _ = Notification::new()
-                        .summary("Timer finished")
-                        .body("00:00")
-                        .icon("dialog-information")
-                        .appname("tui-big-text")
-                        .timeout(Timeout::Never)
-                        .hint(Hint::Resident(true))
-                        .hint(Hint::Transient(false))
-                        .hint(Hint::Urgency(Urgency::Normal))
-                        .hint(Hint::SoundName("complete".to_owned()))
-                        .hint(Hint::SuppressSound(false))
-                        .show();
+                    let _ = tokio::task::spawn_blocking(|| {
+                        Notification::new()
+                            .summary("Timer finished")
+                            .body("00:00")
+                            .icon("dialog-information")
+                            .appname("tui-big-text")
+                            .timeout(Timeout::Never)
+                            .hint(Hint::Resident(true))
+                            .hint(Hint::Transient(false))
+                            .hint(Hint::Urgency(Urgency::Normal))
+                            .hint(Hint::SoundName("complete".to_owned()))
+                            .hint(Hint::SuppressSound(false))
+                            .show()
+                    })
+                    .await;
                     app.timer.notified = true;
                     app.timer.zero_at = Some(std::time::Instant::now());
                 }
             }
         }
 
-        if event::poll(Duration::from_millis(100))?
+        // tick for a short wait and handle key input
+        let _ = tick.tick().await;
+        if event::poll(Duration::from_millis(0))?
             && let Event::Key(key) = event::read()?
             && let Some(value) = handle_keys(&mut app, key)
         {

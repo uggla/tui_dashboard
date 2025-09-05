@@ -24,8 +24,25 @@ pub struct JourneyRow {
     pub nb_transfers: i64,
 }
 
-pub fn fetch_places(
-    client: &reqwest::blocking::Client,
+#[derive(Debug, serde::Deserialize)]
+struct JourneysResponse {
+    #[serde(default)]
+    journeys: Vec<JourneyItem>,
+}
+#[derive(Debug, serde::Deserialize)]
+struct JourneyItem {
+    #[serde(default)]
+    departure_date_time: String,
+    #[serde(default)]
+    arrival_date_time: String,
+    #[serde(default)]
+    duration: Option<i64>,
+    #[serde(default)]
+    nb_transfers: Option<i64>,
+}
+
+pub async fn fetch_places(
+    client: &reqwest::Client,
     api_key: &str,
     query: &str,
 ) -> Result<Vec<Place>, Box<dyn std::error::Error>> {
@@ -33,11 +50,11 @@ pub fn fetch_places(
         "https://api.sncf.com/v1/coverage/sncf/places?q={}",
         urlencoding::encode(query)
     );
-    let resp = client.get(url).basic_auth(api_key, Some("")).send()?;
+    let resp = client.get(url).basic_auth(api_key, Some("")).send().await?;
     if !resp.status().is_success() {
         return Err(format!("HTTP {}", resp.status()).into());
     }
-    let parsed: PlacesResponse = resp.json()?;
+    let parsed: PlacesResponse = resp.json().await?;
     Ok(parsed
         .places
         .into_iter()
@@ -45,18 +62,18 @@ pub fn fetch_places(
         .collect())
 }
 
-pub fn fetch_journeys(
-    client: &reqwest::blocking::Client,
+pub async fn fetch_journeys(
+    client: &reqwest::Client,
     api_key: &str,
     from_id: &str,
     to_id: &str,
 ) -> Result<Vec<JourneyRow>, Box<dyn std::error::Error>> {
     let url = build_journeys_url(from_id, to_id);
-    let resp = client.get(url).basic_auth(api_key, Some("")).send()?;
+    let resp = client.get(url).basic_auth(api_key, Some("")).send().await?;
     if !resp.status().is_success() {
         return Err(format!("HTTP {}", resp.status()).into());
     }
-    let parsed: JourneysResponse = resp.json()?;
+    let parsed: JourneysResponse = resp.json().await?;
     let rows = parsed
         .journeys
         .into_iter()
@@ -79,23 +96,6 @@ pub fn fetch_journeys(
         })
         .collect();
     Ok(rows)
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct JourneysResponse {
-    #[serde(default)]
-    journeys: Vec<JourneyItem>,
-}
-#[derive(Debug, serde::Deserialize)]
-struct JourneyItem {
-    #[serde(default)]
-    departure_date_time: String,
-    #[serde(default)]
-    arrival_date_time: String,
-    #[serde(default)]
-    duration: Option<i64>,
-    #[serde(default)]
-    nb_transfers: Option<i64>,
 }
 
 fn build_journeys_url(from_id: &str, to_id: &str) -> String {
