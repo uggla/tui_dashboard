@@ -1,42 +1,6 @@
 use jiff::tz::TimeZone;
 use jiff::{Unit, Zoned, civil};
 
-// Minimal dependency inversion over an HTTP client
-pub trait Client {
-    type Resp;
-    type Error;
-    fn get(&self, url: &str, api_key: &str) -> Result<Self::Resp, Self::Error>;
-}
-
-pub trait Response {
-    type Error;
-    fn is_success(&self) -> bool;
-    fn status_str(&self) -> String;
-    fn json<T: serde::de::DeserializeOwned>(self) -> Result<T, Self::Error>;
-}
-
-// Adapter for reqwest::blocking::Client
-impl Client for reqwest::blocking::Client {
-    type Resp = reqwest::blocking::Response;
-    type Error = reqwest::Error;
-    fn get(&self, url: &str, api_key: &str) -> Result<Self::Resp, Self::Error> {
-        self.get(url).basic_auth(api_key, Some("")).send()
-    }
-}
-
-impl Response for reqwest::blocking::Response {
-    type Error = reqwest::Error;
-    fn is_success(&self) -> bool {
-        self.status().is_success()
-    }
-    fn status_str(&self) -> String {
-        self.status().to_string()
-    }
-    fn json<T: serde::de::DeserializeOwned>(self) -> Result<T, Self::Error> {
-        self.json()
-    }
-}
-
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct Place {
     pub id: String,
@@ -60,21 +24,18 @@ pub struct JourneyRow {
     pub nb_transfers: i64,
 }
 
-pub fn fetch_places<C: Client, R: Response<Error = E>, E: std::error::Error + 'static>(
-    client: &C,
+pub fn fetch_places(
+    client: &reqwest::blocking::Client,
     api_key: &str,
     query: &str,
-) -> Result<Vec<Place>, Box<dyn std::error::Error>>
-where
-    C::Resp: Into<R>,
-{
+) -> Result<Vec<Place>, Box<dyn std::error::Error>> {
     let url = format!(
         "https://api.sncf.com/v1/coverage/sncf/places?q={}",
         urlencoding::encode(query)
     );
-    let resp: R = client.get(&url, api_key)?.into();
-    if !resp.is_success() {
-        return Err(format!("HTTP {}", resp.status_str()).into());
+    let resp = client.get(url).basic_auth(api_key, Some("")).send()?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()).into());
     }
     let parsed: PlacesResponse = resp.json()?;
     Ok(parsed
@@ -84,19 +45,16 @@ where
         .collect())
 }
 
-pub fn fetch_journeys<C: Client, R: Response<Error = E>, E: std::error::Error + 'static>(
-    client: &C,
+pub fn fetch_journeys(
+    client: &reqwest::blocking::Client,
     api_key: &str,
     from_id: &str,
     to_id: &str,
-) -> Result<Vec<JourneyRow>, Box<dyn std::error::Error>>
-where
-    C::Resp: Into<R>,
-{
+) -> Result<Vec<JourneyRow>, Box<dyn std::error::Error>> {
     let url = build_journeys_url(from_id, to_id);
-    let resp: R = client.get(&url, api_key)?.into();
-    if !resp.is_success() {
-        return Err(format!("HTTP {}", resp.status_str()).into());
+    let resp = client.get(url).basic_auth(api_key, Some("")).send()?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()).into());
     }
     let parsed: JourneysResponse = resp.json()?;
     let rows = parsed
