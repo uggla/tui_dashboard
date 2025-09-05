@@ -1,6 +1,6 @@
+use std::env;
 use std::io;
 use std::time::Duration;
-use std::env;
 
 use crossterm::event::{KeyCode, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
@@ -9,8 +9,8 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 mod app;
-mod ui;
 mod events;
+mod ui;
 use app::{App, Mode};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -44,15 +44,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     res
 }
 
-fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, api_key: String) -> Result<(), Box<dyn std::error::Error>> {
+fn run_app(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    api_key: String,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new(api_key)?;
-    if app.config.is_some() { let _ = app.refresh_journeys(); app.update_timer_from_selection(); }
+    if app.config.is_some() {
+        let _ = app.refresh_journeys();
+        app.update_timer_from_selection();
+    }
 
     loop {
-        terminal.draw(|f| match app.mode { Mode::InputStart | Mode::InputDest | Mode::InputDuration => ui::draw_input(f, &app), Mode::Timer => ui::draw_timer(f, &app) })?;
+        terminal.draw(|f| match app.mode {
+            Mode::InputStart | Mode::InputDest | Mode::InputDuration => ui::draw_input(f, &app),
+            Mode::Timer => ui::draw_timer(f, &app),
+        })?;
 
         match app.mode {
-            Mode::InputStart | Mode::InputDest => { app.maybe_fetch_suggestions(); }
+            Mode::InputStart | Mode::InputDest => {
+                app.maybe_fetch_suggestions();
+            }
             Mode::InputDuration => { /* no suggestions */ }
             Mode::Timer => {
                 // After reaching zero, send notification once
@@ -84,11 +95,28 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, api_key: Strin
                 Mode::InputStart | Mode::InputDest => app.handle_station_keys(k.code),
                 Mode::InputDuration => app.handle_duration_keys(k.code),
                 Mode::Timer => match k.code {
-                    KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('c') if k.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => return Ok(()),
+                    KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('c')
+                        if k.modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                    {
+                        return Ok(());
+                    }
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                    KeyCode::Char('r') => { let _ = app.refresh_journeys(); },
-                    KeyCode::Up => { if app.journeys_selected > 0 { app.journeys_selected -= 1; app.update_timer_from_selection(); } },
-                    KeyCode::Down => { if app.journeys_selected + 1 < app.journeys.len() { app.journeys_selected += 1; app.update_timer_from_selection(); } },
+                    KeyCode::Char('r') => {
+                        let _ = app.refresh_journeys();
+                    }
+                    KeyCode::Up => {
+                        if app.journeys_selected > 0 {
+                            app.journeys_selected -= 1;
+                            app.update_timer_from_selection();
+                        }
+                    }
+                    KeyCode::Down => {
+                        if app.journeys_selected + 1 < app.journeys.len() {
+                            app.journeys_selected += 1;
+                            app.update_timer_from_selection();
+                        }
+                    }
                     KeyCode::Enter => app.update_timer_from_selection(),
                     _ => {}
                 },
