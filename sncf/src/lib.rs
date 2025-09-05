@@ -1,5 +1,5 @@
 use jiff::tz::TimeZone;
-use jiff::{Zoned, civil};
+use jiff::{Unit, Zoned, civil};
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct Place {
@@ -66,18 +66,14 @@ pub fn fetch_journeys(
             let dep_hm = format_hm(&dep);
             let arr_hm = format_hm(&arr);
             let date_str = format_date(&dep);
-            let dur = j.duration.unwrap_or_else(|| {
-                let dep_sec = rfc3339z_to_epoch(&dep.timestamp().to_string()).unwrap_or(0);
-                let arr_sec = rfc3339z_to_epoch(&arr.timestamp().to_string()).unwrap_or(dep_sec);
-                (arr_sec - dep_sec).max(0)
-            });
+            let dur = &arr - &dep;
             Some(JourneyRow {
                 dep,
                 arr,
                 dep_hm,
                 arr_hm,
                 date_str,
-                duration_secs: dur,
+                duration_secs: dur.total(Unit::Second).unwrap() as i64,
                 nb_transfers: j.nb_transfers.unwrap_or(0),
             })
         })
@@ -123,38 +119,6 @@ pub fn parse_sncf_dt(s: &str) -> Option<Zoned> {
     let ss = s[13..15].parse().ok()?;
     let dt = civil::date(y, m, d).at(hh, mm, ss, 0);
     dt.to_zoned(TimeZone::system()).ok()
-}
-
-pub fn rfc3339z_to_epoch(s: &str) -> Option<i64> {
-    if s.len() < 20 || !s.ends_with('Z') {
-        return None;
-    }
-    let year: i64 = s[0..4].parse().ok()?;
-    let month: i64 = s[5..7].parse().ok()?;
-    let day: i64 = s[8..10].parse().ok()?;
-    let hour: i64 = s[11..13].parse().ok()?;
-    let minute: i64 = s[14..16].parse().ok()?;
-    let second: i64 = s[17..19].parse().ok()?;
-    fn is_leap(y: i64) -> bool {
-        (y % 4 == 0) && ((y % 100 != 0) || (y % 400 == 0))
-    }
-    fn days_before_year(y: i64) -> i64 {
-        let y1 = y - 1;
-        let leaps = y1 / 4 - y1 / 100 + y1 / 400;
-        let base = 1969;
-        let leaps_base = base / 4 - base / 100 + base / 400;
-        (y1 - 1970 + 1) * 365 + (leaps - leaps_base)
-    }
-    fn days_before_month(y: i64, m: i64) -> i64 {
-        let md = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
-        let mut d = md[(m - 1) as usize] as i64;
-        if m > 2 && is_leap(y) {
-            d += 1;
-        }
-        d
-    }
-    let days = days_before_year(year) + days_before_month(year, month) + (day - 1);
-    Some(days * 86_400 + hour * 3600 + minute * 60 + second)
 }
 
 pub fn format_hm(z: &Zoned) -> String {

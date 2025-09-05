@@ -1,4 +1,4 @@
-use jiff::Zoned;
+use jiff::{Unit, Zoned};
 use ratatui::widgets::ListItem;
 use sncf::fetch_places;
 use std::time::{Duration, Instant};
@@ -65,7 +65,7 @@ pub const MIN_QUERY_LEN: usize = 2;
 pub const DEFAULT_TIMER_SECS: u64 = 30;
 
 impl App {
-    pub fn new(api_key: String) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(api_key: String) -> anyhow::Result<Self> {
         let client = reqwest::blocking::Client::builder()
             .user_agent("tui-big-text/0.1")
             .build()?;
@@ -163,123 +163,6 @@ impl App {
         }
     }
 
-    pub fn handle_station_keys(&mut self, code: crossterm::event::KeyCode) {
-        use crossterm::event::KeyCode::*;
-        match code {
-            Char('q') | Esc => std::process::exit(0),
-            Enter => {
-                if let Some(place) = self.input.suggestions.get(self.input.selected).cloned() {
-                    match self.mode {
-                        Mode::InputStart => {
-                            self.chosen_start = Some(place);
-                            self.reset_input();
-                            self.mode = Mode::InputDest;
-                        }
-                        Mode::InputDest => {
-                            self.chosen_dest = Some(place);
-                            self.reset_input();
-                            self.mode = Mode::InputDuration;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Backspace => {
-                if self.input.cursor > 0 && self.input.cursor <= self.input.text.len() {
-                    self.input.text.remove(self.input.cursor - 1);
-                    self.input.cursor -= 1;
-                    self.input.last_edit_at = Instant::now();
-                }
-            }
-            Left => {
-                if self.input.cursor > 0 {
-                    self.input.cursor -= 1;
-                }
-            }
-            Right => {
-                if self.input.cursor < self.input.text.len() {
-                    self.input.cursor += 1;
-                }
-            }
-            Up => {
-                if self.input.selected > 0 {
-                    self.input.selected -= 1;
-                }
-            }
-            Down => {
-                if self.input.selected + 1 < self.input.suggestions.len() {
-                    self.input.selected += 1;
-                }
-            }
-            Char(c) => {
-                self.input.text.insert(self.input.cursor, c);
-                self.input.cursor += 1;
-                self.input.last_edit_at = Instant::now();
-            }
-            _ => {}
-        }
-    }
-
-    pub fn handle_duration_keys(&mut self, code: crossterm::event::KeyCode) {
-        use crossterm::event::KeyCode::*;
-        match code {
-            Char('q') | Esc => std::process::exit(0),
-            Enter => match parse_minutes(&self.input.text) {
-                Ok(mins) if mins > 0 => {
-                    self.approach_minutes = Some(mins);
-                    if let (Some(start), Some(dest), Some(minutes)) = (
-                        self.chosen_start.clone(),
-                        self.chosen_dest.clone(),
-                        self.approach_minutes,
-                    ) {
-                        let conf = AppConfig {
-                            start: SavedPlace {
-                                id: start.id,
-                                name: start.name,
-                            },
-                            destination: SavedPlace {
-                                id: dest.id,
-                                name: dest.name,
-                            },
-                            approach_minutes: minutes,
-                        };
-                        let _ = save_config(&conf);
-                        self.config = Some(conf);
-                    }
-                    self.timer.duration = Duration::from_secs(self.approach_minutes.unwrap() * 60);
-                    self.timer.start = Instant::now();
-                    self.timer.notified = false;
-                    self.timer.zero_at = None;
-                    self.mode = Mode::Timer;
-                }
-                _ => {
-                    self.input.error = Some("Please enter minutes, e.g., 5 or 5mn".into());
-                }
-            },
-            Backspace => {
-                if self.input.cursor > 0 && self.input.cursor <= self.input.text.len() {
-                    self.input.text.remove(self.input.cursor - 1);
-                    self.input.cursor -= 1;
-                }
-            }
-            Left => {
-                if self.input.cursor > 0 {
-                    self.input.cursor -= 1;
-                }
-            }
-            Right => {
-                if self.input.cursor < self.input.text.len() {
-                    self.input.cursor += 1;
-                }
-            }
-            Char(c) => {
-                self.input.text.insert(self.input.cursor, c);
-                self.input.cursor += 1;
-            }
-            _ => {}
-        }
-    }
-
     pub fn maybe_fetch_suggestions(&mut self) {
         if self.input.text.len() >= MIN_QUERY_LEN
             && self.input.text != self.input.last_queried
@@ -336,9 +219,12 @@ impl App {
         let sel = self.journeys_selected.min(self.journeys.len() - 1);
         let dep = self.journeys[sel].dep.clone();
         let now = Zoned::now();
-        let dep_sec = sncf::rfc3339z_to_epoch(&dep.timestamp().to_string()).unwrap_or(0);
-        let now_sec = sncf::rfc3339z_to_epoch(&now.timestamp().to_string()).unwrap_or(0);
-        let mut secs = (dep_sec - now_sec).max(0);
+        // Compute seconds until departure using Jiff spans (DST-aware)
+        let mut secs = match now.until(&dep) {
+            Ok(span) => span.total(Unit::Second).unwrap() as i64,
+
+            Err(_) => 0,
+        };
         if let Some(conf) = &self.config {
             secs -= (conf.approach_minutes as i64) * 60;
         }
@@ -351,7 +237,7 @@ impl App {
         self.timer.zero_at = None;
     }
 
-    fn reset_input(&mut self) {
+    pub fn reset_input(&mut self) {
         self.input.text.clear();
         self.input.cursor = 0;
         self.input.suggestions.clear();
@@ -370,19 +256,4 @@ pub fn save_config(conf: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     let data = toml::to_string_pretty(conf)?;
     std::fs::write(CONFIG_PATH, data)?;
     Ok(())
-}
-pub fn parse_minutes(s: &str) -> Result<u64, ()> {
-    let trimmed = s.trim().to_lowercase();
-    let mut digits = String::new();
-    for ch in trimmed.chars() {
-        if ch.is_ascii_digit() {
-            digits.push(ch);
-        } else {
-            break;
-        }
-    }
-    if digits.is_empty() {
-        return Err(());
-    }
-    digits.parse::<u64>().map_err(|_| ())
 }
