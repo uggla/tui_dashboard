@@ -183,7 +183,7 @@ impl App {
         }
     }
 
-    pub async fn refresh_journeys(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn refresh_journeys(&mut self) -> anyhow::Result<()> {
         let conf = match &self.config {
             Some(c) => c,
             None => return Ok(()),
@@ -252,7 +252,7 @@ pub fn load_config() -> Option<AppConfig> {
         .ok()
         .and_then(|d| toml::from_str(&d).ok())
 }
-pub fn save_config(conf: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
+pub fn save_config(conf: &AppConfig) -> anyhow::Result<()> {
     let data = toml::to_string_pretty(conf)?;
     std::fs::write(CONFIG_PATH, data)?;
     Ok(())
