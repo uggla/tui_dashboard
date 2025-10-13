@@ -62,7 +62,7 @@ pub fn draw_timer(f: &mut ratatui::Frame, app: &App) {
     let elapsed = app.timer.start.elapsed();
     let remaining = app.remaining_time(elapsed);
     let show = if let Some(z) = app.timer.zero_at {
-        ((std::time::Instant::now() - z).as_millis() / 500) % 2 == 0
+        ((std::time::Instant::now() - z).as_millis() / 500).is_multiple_of(2)
     } else {
         true
     };
