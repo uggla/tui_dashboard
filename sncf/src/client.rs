@@ -82,21 +82,18 @@ impl HTTPClient for FakeClient {
 // --- Test Module ---
 #[cfg(test)]
 mod tests {
-    use serde::Deserialize;
+
+    use crate::PlacesResponse;
 
     use super::*;
-
-    #[derive(Debug, Deserialize)]
-    struct Machin {
-        name: String,
-    }
 
     #[tokio::test]
     async fn test_get_invalid_url_error() {
         let client = ReqwestClient::new();
         let invalid_url = "this is not a valid url";
 
-        let result: Result<Machin, SncfAPIError> = client.get(invalid_url, "user", None).await;
+        let result: Result<PlacesResponse, SncfAPIError> =
+            client.get(invalid_url, "user", None).await;
 
         // assert that the result is an err
         assert!(result.is_err());
@@ -113,7 +110,8 @@ mod tests {
         let client = ReqwestClient::new();
         let invalid_url = "http://thisdomaindoesnotexist";
 
-        let result: Result<Machin, SncfAPIError> = client.get(invalid_url, "user", None).await;
+        let result: Result<PlacesResponse, SncfAPIError> =
+            client.get(invalid_url, "user", None).await;
 
         // assert that the result is an err
         assert!(result.is_err());
@@ -124,16 +122,15 @@ mod tests {
             &error
         );
     }
+
     #[tokio::test]
     async fn test_fake_client() {
         let client = FakeClient::new();
-        let invalid_url = "http://truc/bidule";
+        let url = "https://api.sncf.com/v1/coverage/sncf/places?q=Grenoble";
 
-        let result: Result<Machin, SncfAPIError> = client.get(invalid_url, "user", None).await;
+        let result: Result<PlacesResponse, SncfAPIError> = client.get(url, "user", None).await;
 
         assert!(result.is_ok());
-
-        let result = format!("{:?}", result.unwrap());
-        assert_eq!(result, "{}");
+        assert_eq!(result.unwrap().places.len(), 9);
     }
 }
